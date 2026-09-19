@@ -36,7 +36,7 @@ const incidents = [
     violation: "No Helmet",
     vehicleNumber: "TS09AB1234",
     location: "Tank Bund, Hyderabad",
-    status: "Verified",
+    status: "Pending Review",
     severity: "Medium",
     timestamp: "2026-09-16 18:42:10"
   },
@@ -54,7 +54,7 @@ const incidents = [
     violation: "Triple Riding",
     vehicleNumber: "TS08EF9012",
     location: "Kukatpally, Hyderabad",
-    status: "Verified",
+    status: "Pending Review",
     severity: "High",
     timestamp: "2026-09-16 18:21:45"
   }
