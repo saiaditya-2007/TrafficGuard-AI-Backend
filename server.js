@@ -3,13 +3,14 @@ const cors = require("cors");
 require("dotenv").config();
 
 let supabase = null;
-if (process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY) {
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_PUBLISHABLE_KEY;
+
+if (supabaseUrl && supabaseKey) {
   try {
     const { createClient } = require("@supabase/supabase-js");
-    supabase = createClient(
-      process.env.SUPABASE_URL,
-      process.env.SUPABASE_SECRET_KEY
-    );
+    supabase = createClient(supabaseUrl, supabaseKey);
+    console.log("Supabase client initialized successfully");
   } catch (err) {
     console.warn("Supabase init skipped:", err.message);
   }
@@ -21,16 +22,8 @@ const PORT = process.env.PORT || 5050;
 app.use(cors());
 app.use(express.json());
 
-// Health check
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "ok",
-    message: "TrafficGuard AI backend is running"
-  });
-});
-
-// Sample traffic incidents (in-memory)
-const incidents = [
+// Baseline traffic incidents (in-memory cache & initial seed)
+let incidents = [
   {
     id: "TG001",
     violation: "No Helmet",
@@ -60,7 +53,62 @@ const incidents = [
   }
 ];
 
-// Get all incidents
+// Helper: map DB record to API incident
+function mapDbIncident(row) {
+  return {
+    id: row.id,
+    violation: row.violation,
+    vehicleNumber: row.vehicle_number || row.vehicleNumber || "",
+    location: row.location,
+    status: row.status,
+    severity: row.severity,
+    timestamp: row.timestamp
+  };
+}
+
+// Helper: seed baseline incidents to Supabase if not present
+async function seedBaselineIfEmpty() {
+  if (!supabase) return;
+  try {
+    for (const inc of incidents) {
+      const { data } = await supabase
+        .from("incidents")
+        .select("id")
+        .eq("id", inc.id)
+        .single();
+
+      if (!data) {
+        await supabase.from("incidents").insert([
+          {
+            id: inc.id,
+            violation: inc.violation,
+            vehicle_number: inc.vehicleNumber,
+            location: inc.location,
+            status: inc.status,
+            severity: inc.severity,
+            timestamp: inc.timestamp
+          }
+        ]);
+        console.log(`Seeded baseline incident ${inc.id} to Supabase`);
+      }
+    }
+  } catch (err) {
+    console.warn("Supabase seed warning:", err.message);
+  }
+}
+
+seedBaselineIfEmpty();
+
+// Health check
+app.get("/api/health", (req, res) => {
+  res.json({
+    status: "ok",
+    message: "TrafficGuard AI backend is running",
+    persistence: supabase ? "supabase" : "in-memory"
+  });
+});
+
+// Get all incidents (persisted in Supabase with in-memory fallback)
 app.get("/api/incidents", async (req, res) => {
   try {
     if (supabase) {
@@ -71,16 +119,9 @@ app.get("/api/incidents", async (req, res) => {
           .order("timestamp", { ascending: false });
 
         if (!error && data && data.length > 0) {
-          const dbIncidents = data.map((item) => ({
-            id: item.id,
-            violation: item.violation,
-            vehicleNumber: item.vehicle_number,
-            location: item.location,
-            status: item.status,
-            severity: item.severity,
-            timestamp: item.timestamp
-          }));
+          const dbIncidents = data.map(mapDbIncident);
 
+          // Guarantee baseline TG001, TG002, TG003 are never lost
           const existingIds = new Set(dbIncidents.map((i) => i.id));
           const merged = [...dbIncidents];
           for (const inc of incidents) {
@@ -89,6 +130,9 @@ app.get("/api/incidents", async (req, res) => {
             }
           }
 
+          // Sync in-memory cache
+          incidents = merged;
+
           return res.json({
             success: true,
             count: merged.length,
@@ -96,7 +140,7 @@ app.get("/api/incidents", async (req, res) => {
           });
         }
       } catch (dbErr) {
-        console.warn("Supabase fetch warning, using in-memory:", dbErr.message);
+        console.warn("Supabase fetch warning, using in-memory cache:", dbErr.message);
       }
     }
 
@@ -114,7 +158,7 @@ app.get("/api/incidents", async (req, res) => {
   }
 });
 
-// Create new incident
+// Create new incident (persisted in Supabase)
 app.post("/api/incidents", async (req, res) => {
   try {
     const { id, violation, vehicleNumber, location, status, severity, timestamp } = req.body;
@@ -129,13 +173,13 @@ app.post("/api/incidents", async (req, res) => {
       timestamp: timestamp || new Date().toISOString().replace("T", " ").slice(0, 19)
     };
 
-    // Add to in-memory array at the beginning
+    // Prepend to in-memory array
     incidents.unshift(newIncident);
 
-    // If Supabase is configured, sync to table
+    // Persist to Supabase
     if (supabase) {
       try {
-        await supabase.from("incidents").insert([
+        const { error } = await supabase.from("incidents").insert([
           {
             id: newIncident.id,
             violation: newIncident.violation,
@@ -146,8 +190,13 @@ app.post("/api/incidents", async (req, res) => {
             timestamp: newIncident.timestamp
           }
         ]);
+        if (error) {
+          console.warn("Supabase insert error:", error.message);
+        } else {
+          console.log(`Incident ${newIncident.id} persisted to Supabase`);
+        }
       } catch (dbErr) {
-        console.warn("Supabase insert warning:", dbErr.message);
+        console.warn("Supabase insert exception:", dbErr.message);
       }
     }
 
@@ -164,16 +213,8 @@ app.post("/api/incidents", async (req, res) => {
   }
 });
 
-// Get one incident by ID
+// Get one incident by ID (persisted in Supabase)
 app.get("/api/incidents/:id", async (req, res) => {
-  const inMem = incidents.find((item) => item.id === req.params.id);
-  if (inMem) {
-    return res.json({
-      success: true,
-      incident: inMem
-    });
-  }
-
   if (supabase) {
     try {
       const { data, error } = await supabase
@@ -185,20 +226,20 @@ app.get("/api/incidents/:id", async (req, res) => {
       if (!error && data) {
         return res.json({
           success: true,
-          incident: {
-            id: data.id,
-            violation: data.violation,
-            vehicleNumber: data.vehicle_number,
-            location: data.location,
-            status: data.status,
-            severity: data.severity,
-            timestamp: data.timestamp
-          }
+          incident: mapDbIncident(data)
         });
       }
     } catch (dbErr) {
       console.warn("Supabase get single error:", dbErr.message);
     }
+  }
+
+  const inMem = incidents.find((item) => item.id === req.params.id);
+  if (inMem) {
+    return res.json({
+      success: true,
+      incident: inMem
+    });
   }
 
   return res.status(404).json({
@@ -207,28 +248,39 @@ app.get("/api/incidents/:id", async (req, res) => {
   });
 });
 
-// Update incident status
+// Update incident status (persisted in Supabase)
 app.put("/api/incidents/:id/status", async (req, res) => {
   try {
     const { status } = req.body;
+    let targetIncident = incidents.find((item) => item.id === req.params.id);
 
-    const incident = incidents.find((item) => item.id === req.params.id);
-    if (incident) {
-      incident.status = status;
+    if (targetIncident) {
+      targetIncident.status = status;
     }
 
     if (supabase) {
       try {
-        await supabase
+        const { data, error } = await supabase
           .from("incidents")
           .update({ status })
-          .eq("id", req.params.id);
+          .eq("id", req.params.id)
+          .select();
+
+        if (!error && data && data.length > 0) {
+          const updatedDb = mapDbIncident(data[0]);
+          if (!targetIncident) {
+            targetIncident = updatedDb;
+            incidents.unshift(targetIncident);
+          } else {
+            targetIncident.status = updatedDb.status;
+          }
+        }
       } catch (dbErr) {
         console.warn("Supabase update error:", dbErr.message);
       }
     }
 
-    if (!incident) {
+    if (!targetIncident) {
       return res.status(404).json({
         success: false,
         message: "Incident not found"
@@ -238,7 +290,7 @@ app.put("/api/incidents/:id/status", async (req, res) => {
     res.json({
       success: true,
       message: "Incident status updated",
-      incident
+      incident: targetIncident
     });
   } catch (error) {
     console.error("Failed to update incident:", error);
