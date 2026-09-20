@@ -124,22 +124,12 @@ app.get("/api/incidents", async (req, res) => {
         if (!error && data && data.length > 0) {
           const dbIncidents = data.map(mapDbIncident);
 
-          // Guarantee baseline TG001, TG002, TG003 are never lost
-          const existingIds = new Set(dbIncidents.map((i) => i.id));
-          const merged = [...dbIncidents];
-          for (const inc of incidents) {
-            if (!existingIds.has(inc.id)) {
-              merged.push(inc);
-            }
-          }
-
-          // Sync in-memory cache
-          incidents = merged;
+          incidents = dbIncidents;
 
           return res.json({
             success: true,
-            count: merged.length,
-            incidents: merged
+            count: dbIncidents.length,
+            incidents: dbIncidents
           });
         }
       } catch (dbErr) {
